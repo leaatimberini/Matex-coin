@@ -9,7 +9,7 @@ import requests
 class Blockchain:
     def __init__(self):
         self.chain = []
-        self.current_transactions = []
+        self.current_transactions = []  # Lista de transacciones pendientes
         self.nodes = set()  # Conjunto de nodos en la red
 
         # Intentar cargar la blockchain y las transacciones desde archivos
@@ -54,16 +54,43 @@ class Blockchain:
         :param amount: Cantidad
         :return: El índice del bloque que contendrá la transacción
         """
-        self.current_transactions.append({
+        transaction = {
             'sender': sender,
             'recipient': recipient,
             'amount': amount,
-        })
+        }
+
+        self.current_transactions.append(transaction)
 
         # Guardar las transacciones después de añadir una nueva
         self.save_data()
 
         return self.last_block['index'] + 1
+
+    def mine_block(self, proof):
+        """
+        Minar un bloque e incluir transacciones pendientes en el bloque.
+        
+        :param proof: El proof of work proporcionado por el minero
+        :return: El bloque recién creado y añadido a la cadena
+        """
+        # Crear un nuevo bloque
+        block = {
+            'index': len(self.chain) + 1,
+            'timestamp': time(),
+            'transactions': self.current_transactions,  # Transacciones pendientes
+            'proof': proof,
+            'previous_hash': self.hash(self.last_block) if self.chain else '0'
+        }
+        
+        # Reiniciar la lista de transacciones pendientes
+        self.current_transactions = []
+        
+        # Añadir el bloque a la cadena
+        self.chain.append(block)
+        self.save_data()
+        
+        return block
 
     # Método para guardar la cadena y las transacciones en archivos JSON
     def save_data(self):
@@ -145,9 +172,6 @@ class Blockchain:
 
         while current_index < len(chain):
             block = chain[current_index]
-            print(f'{last_block}')
-            print(f'{block}')
-            print("\n-----------\n")
             # Verificar que el hash del bloque anterior sea correcto
             if block['previous_hash'] != self.hash(last_block):
                 return False
@@ -189,6 +213,76 @@ class Blockchain:
         # Reemplazar la cadena si encontramos una válida y más larga
         if new_chain:
             self.chain = new_chain
+            self.save_data()
             return True
 
         return False
+
+    def get_balance(self, address):
+        """
+        Calcula el saldo de una dirección específica.
+
+        :param address: Dirección a verificar
+        :return: Saldo de la dirección
+        """
+        balance = 0
+
+        # Recorremos todos los bloques y transacciones para calcular el saldo
+        for block in self.chain:
+            for transaction in block['transactions']:
+                if transaction['recipient'] == address:
+                    balance += transaction['amount']
+                if transaction['sender'] == address:
+                    balance -= transaction['amount']
+
+        return balance
+    
+    def broadcast_transaction(self, transaction):
+        """
+        Difunde una transacción a todos los nodos registrados en la red.
+
+        :param transaction: La transacción que se va a difundir
+        """
+        for node in self.nodes:
+            try:
+                url = f'http://{node}/transactions/new'
+                response = requests.post(url, json=transaction)
+                if response.status_code != 201:
+                    print(f"No se pudo enviar la transacción al nodo: {node}")
+            except requests.exceptions.RequestException as e:
+                print(f"Error al conectar con el nodo {node}: {e}")
+
+    def broadcast_block(self, block):
+        """
+        Difunde un bloque recién minado a todos los nodos registrados en la red.
+
+        :param block: El bloque que se va a difundir
+        """
+        for node in self.nodes:
+            try:
+                url = f'http://{node}/receive_block'
+                response = requests.post(url, json=block)
+                if response.status_code != 201:
+                    print(f"No se pudo enviar el bloque al nodo: {node}")
+            except requests.exceptions.RequestException as e:
+                print(f"Error al conectar con el nodo {node}: {e}")
+
+    def receive_block(self, block):
+        """
+        Recibe un bloque de otro nodo y verifica si debe añadirse a la cadena local.
+
+        :param block: El bloque recibido
+        :return: True si el bloque fue añadido, False en caso contrario
+        """
+        last_block = self.last_block
+        if self.hash(last_block) == block['previous_hash']:
+            self.chain.append(block)
+            self.save_data()
+            return True
+        else:
+            # Si no coincide, iniciar el proceso de consenso para resolver conflictos
+            self.resolve_conflicts()
+            return False
+    def is_valid_transaction(self, sender, amount):
+        balance = self.get_balance(sender)
+        return balance >= amount

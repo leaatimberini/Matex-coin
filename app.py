@@ -2,20 +2,46 @@ import sys
 from flask import Flask, jsonify, request
 from uuid import uuid4
 from blockchain import Blockchain
+from functools import wraps
+import jwt
+import datetime
+from wallet import Wallet, save_wallet, load_wallets
 
-# El resto de tu código sigue igual...
-
+SECRET_KEY = 'Pb]XQkjdfP77Rf;LNiw^'  # Asegúrate de cambiarla por algo más seguro
 
 # Instanciar la aplicación de Flask
 app = Flask(__name__)
+
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.args.get('token')  # Obtener el token de los parámetros de la URL
+        if not token:
+            return jsonify({'message': 'Token es necesario!'}), 403
+        try:
+            data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        except jwt.ExpiredSignatureError:
+            return jsonify({'message': 'El token ha expirado!'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'message': 'Token inválido!'}), 401
+        return f(*args, **kwargs)
+    return decorated
 
 # Generar una dirección única para este nodo
 node_identifier = str(uuid4()).replace('-', '')
 
 # Instanciar la blockchain
 blockchain = Blockchain()
+@app.route('/login', methods=['POST'])
+def login():
+    auth = request.get_json()
+    if auth and auth['username'] == 'admin' and auth['password'] == 'password':  # Cambia a algo más seguro
+        token = jwt.encode({'user': auth['username'], 'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=30)}, SECRET_KEY, algorithm="HS256")
+        return jsonify({'token': token})
+    return jsonify({'message': 'No autorizado'}), 401
 
 @app.route('/mine', methods=['GET'])
+@token_required
 def mine():
     # Ejecutar el algoritmo de consenso para obtener la siguiente prueba
     last_block = blockchain.last_block
@@ -42,19 +68,41 @@ def mine():
     return jsonify(response), 200
 
 @app.route('/transactions/new', methods=['POST'])
+@token_required
 def new_transaction():
-    values = request.get_json()
+    try:
+        values = request.get_json()
+        if not values:
+            return 'Error: No se proporcionaron datos JSON', 400
 
-    # Verificar que los campos requeridos estén en los datos POST
-    required = ['sender', 'recipient', 'amount']
-    if not all(k in values for k in required):
-        return 'Faltan valores', 400
+        required = ['sender', 'recipient', 'amount']
+        if not all(k in values for k in required):
+            return 'Faltan valores en la transacción', 400
 
-    # Crear una nueva transacción
-    index = blockchain.new_transaction(values['sender'], values['recipient'], values['amount'])
+        # Verificar si el remitente tiene saldo suficiente
+        if not blockchain.is_valid_transaction(values['sender'], values['amount']):
+            return jsonify({'message': 'Saldo insuficiente para realizar la transacción'}), 400
 
-    response = {'message': f'La transacción se añadirá al bloque {index}'}
-    return jsonify(response), 201
+        # Crear la nueva transacción
+        index = blockchain.new_transaction(values['sender'], values['recipient'], values['amount'])
+
+        # Difundir la transacción a otros nodos
+        blockchain.broadcast_transaction(values)
+
+        response = {'message': f'La transacción se añadirá al bloque {index}'}
+        return jsonify(response), 201
+    except Exception as e:
+        print(f"Error procesando la transacción: {e}")
+        return 'Error interno del servidor', 500
+
+
+@app.route('/transactions/pending', methods=['GET'])
+def get_pending_transactions():
+    response = {
+        'pending_transactions': blockchain.current_transactions,
+        'total': len(blockchain.current_transactions)
+    }
+    return jsonify(response), 200
 
 @app.route('/chain', methods=['GET'])
 def full_chain():
@@ -70,7 +118,7 @@ def register_nodes():
 
     nodes = values.get('nodes')
     if nodes is None:
-        return "Error: Por favor, suministra una lista válida de nodos", 400
+        return "Error: Favor de suministrar una lista válida de nodos", 400
 
     for node in nodes:
         blockchain.register_node(node)
@@ -92,11 +140,62 @@ def consensus():
         }
     else:
         response = {
-            'message': 'Nuestra cadena es autoritativa',
+            'message': 'Nuestra cadena es la autorizada',
             'chain': blockchain.chain
         }
 
     return jsonify(response), 200
+
+# Endpoint para obtener el saldo de una dirección específica.
+@app.route('/balance/<address>', methods=['GET'])
+def get_balance(address):
+    """
+    Endpoint para obtener el saldo de una dirección específica.
+
+    :param address: Dirección a verificar
+    :return: Saldo de la dirección
+    """
+    balance = blockchain.get_balance(address)
+    response = {
+        'address': address,
+        'balance': balance,
+    }
+    return jsonify(response), 200
+
+@app.route('/broadcast_block', methods=['POST'])
+def broadcast_block():
+    values = request.get_json()
+    
+    # Verificar que se recibieron datos
+    if not values:
+        return 'Error: No se proporcionaron datos JSON', 400
+    
+    # Intentar recibir el bloque
+    block_added = blockchain.receive_block(values)
+    
+    if block_added:
+        response = {'message': 'Bloque recibido y añadido correctamente'}
+        return jsonify(response), 201
+    else:
+        response = {'message': 'El bloque no se pudo añadir. Cadena en proceso de consenso.'}
+        return jsonify(response), 400
+    
+# Endpoint para crear una nueva billetera
+@app.route('/wallet/new', methods=['GET'])
+def new_wallet():
+    wallet = Wallet()
+    save_wallet(wallet)
+    response = {
+        'message': 'Nueva billetera creada',
+        'address': wallet.address
+    }
+    return jsonify(response), 201
+
+# Endpoint para obtener todas las billeteras
+@app.route('/wallets', methods=['GET'])
+def get_wallets():
+    wallets = load_wallets()
+    return jsonify({'wallets': wallets, 'total': len(wallets)}), 200
 
 # Ejecutar el servidor
 if __name__ == '__main__':
